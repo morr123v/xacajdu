@@ -1,0 +1,68 @@
+name: Setup SSH Runner + Tailscale Funnel (Web Terminal)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  setup-funnel:
+    runs-on: ubuntu-latest
+    env:
+      TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+      USERNAME: runner
+      PASSWORD: runner
+      TAILSCALE_HOSTNAME: gh-ssh-${{ github.run_id }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ensure runner user has sudo + password
+        run: |
+          echo "${USERNAME}:${PASSWORD}" | sudo chpasswd
+          echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/${USERNAME}
+
+      - name: Install ttyd (Web Terminal)
+        run: |
+          echo ">>> Installing ttyd..."
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential cmake git libjson-c-dev libwebsockets-dev
+          git clone https://github.com/tsl0922/ttyd.git
+          cd ttyd
+          mkdir build && cd build
+          cmake ..
+          make && sudo make install
+          # ttyd දැන් /usr/local/bin/ttyd හි ඇත
+
+      - name: Install Tailscale
+        run: |
+          echo ">>> Installing Tailscale..."
+          curl -fsSL https://tailscale.com/install.sh | sudo sh
+          sudo tailscale up --authkey "${TAILSCALE_AUTHKEY}" --hostname "${TAILSCALE_HOSTNAME}"
+
+      - name: Start ttyd and expose with Tailscale Serve + Funnel
+        run: |
+          # ttyd service එක background එකේ start කරන්න (port 8080)
+          ttyd --port 8080 --credential "${USERNAME}:${PASSWORD}" bash &
+          sleep 2
+
+          # Tailscale Serve enable කර ttyd port එක HTTPS හරහා serve කරන්න
+          sudo tailscale serve --bg --https=443 8080
+
+          # Tailscale Funnel enable කරන්න (public internet එකට expose වෙනවා)
+          sudo tailscale funnel --bg --https=443 8080
+
+          # Tailscale domain එක ලබා ගන්න
+          TAILSCALE_IP=$(tailscale ip -4 | head -n1)
+          TS_DOMAIN="${TAILSCALE_HOSTNAME}.${TAILSCALE_USER:-$(whoami)}.ts.net"  # හරි format එක check කරන්න
+          echo "=== WEB TERMINAL ACCESS ==="
+          echo "URL: https://${TS_DOMAIN}"
+          echo "USERNAME: ${USERNAME}"
+          echo "PASSWORD: ${PASSWORD}"
+          echo
+          echo "Browser එකෙන් ඉහත URL එක විවෘත කර පිවිසෙන්න."
+          echo "This method is provided by @MR_English2008 on Telegram."
+          echo "For more methods, join: https://t.me/ME2008_RDP"
+          echo ">>> Keeping runner alive..."
+          tail -f /dev/null
