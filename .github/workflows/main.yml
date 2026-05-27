@@ -1,0 +1,80 @@
+name: Setup OpenBullet2 + Tailscale Funnel
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  setup-openbullet2:
+    runs-on: ubuntu-latest
+    env:
+      TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+      TAILSCALE_HOSTNAME: ob2-${{ github.run_id }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install .NET & OpenBullet2
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq wget unzip
+
+          # Install ASP.NET Core runtime
+          wget https://dot.net/v1/dotnet-install.sh -O dotnet-install.sh
+          chmod +x dotnet-install.sh
+          sudo ./dotnet-install.sh --channel 8.0 --runtime aspnetcore
+          export DOTNET_ROOT=/usr/share/dotnet
+          export PATH=$PATH:/usr/share/dotnet
+          echo "DOTNET_ROOT=/usr/share/dotnet" | sudo tee -a /etc/environment
+          echo "PATH=$PATH:/usr/share/dotnet" | sudo tee -a /etc/environment
+
+          # Download OpenBullet2
+          mkdir -p ~/openbullet2
+          cd ~/openbullet2
+          wget https://github.com/openbullet/OpenBullet2/releases/latest/download/OpenBullet2.Web.zip
+          unzip -o OpenBullet2.Web.zip
+          
+          # Force bind to 0.0.0.0 (not localhost)
+          echo '{"Kestrel": {"Endpoints": {"Http": {"Url": "http://0.0.0.0:5000"}}}}' > appsettings.override.json
+        shell: bash
+
+      - name: Install Tailscale & Enable Funnel
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sudo sh
+          sudo tailscale up --authkey="${TAILSCALE_AUTHKEY}" --hostname="${TAILSCALE_HOSTNAME}"
+          
+          # Tailscale Funnel requires this feature to be turned on in the admin console
+          # but we still try to enable it here
+          sudo tailscale funnel --https=443 --bg 5000 || echo "Funnel might need manual enable in Tailscale admin"
+        shell: bash
+
+      - name: Start OpenBullet2
+        run: |
+          cd ~/openbullet2
+          # Start in background, log to file
+          nohup dotnet OpenBullet2.Web.dll --urls "http://0.0.0.0:5000" > ob2.log 2>&1 &
+          sleep 15
+          # Verify it's listening on all interfaces
+          sudo netstat -tulpn | grep 5000 || echo "Port 5000 not listening yet"
+        shell: bash
+
+      - name: Verify Funnel & Show URL
+        run: |
+          sleep 5
+          echo "=== OPENBULLET2 + TAILSCALE FUNNEL ==="
+          tailscale status
+          echo ""
+          echo "Public URL: https://${TAILSCALE_HOSTNAME}.ts.net"
+          echo ""
+          echo "If you get 'Address Not Found':"
+          echo "1. Go to https://login.tailscale.com/admin/settings/funnel"
+          echo "2. Turn ON 'Tailscale Funnel' for your tailnet"
+          echo "3. Wait 2-3 minutes, then retry the URL"
+          echo ""
+          echo "You can also access locally via Tailscale IP:"
+          echo "   http://$(tailscale ip -4):5000"
+          echo ""
+          echo "Keeping runner alive..."
+          tail -f /dev/null
